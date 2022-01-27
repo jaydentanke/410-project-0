@@ -1,0 +1,5 @@
+It is ok to add tests to this directory, but you should
+not make changes to any file that we placed here -- except
+maybe temporarily during debugging.  Be sure to "make update"
+to undo your debugging changes, and then re-run tests, before
+submitting your work!
