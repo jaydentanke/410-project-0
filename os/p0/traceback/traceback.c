@@ -41,37 +41,20 @@ bool address_valid(char* test, char* tmp) {
 
 const functsym_t* find_function_at_address(void* addr) {
 	const functsym_t* found = NULL;
-	int distance = 0;
+	unsigned int distance = 0;
 
 	for (int i = 0; i < FUNCTS_MAX_NUM && strlen(functions[i].name) > 0; i++) {
-		if (functions[i].addr < addr && ((addr - functions[i].addr) <= MAX_FUNCTION_SIZE_BYTES) && ((found == NULL) || ((addr - functions[i].addr) < distance))) {
+		if (functions[i].addr < addr && (((unsigned int) (addr - functions[i].addr)) <= MAX_FUNCTION_SIZE_BYTES) && ((found == NULL) || ((addr - functions[i].addr) < distance))) {
 			found = &functions[i];
-			distance = addr - functions[i].addr;
+			distance = (unsigned int) (addr - functions[i].addr);
 		}
 	}
 	return found;
 }
 
-// TODO: UNSAFE
-bool string_printable(char* s) {
-	// this line might explode
-	printf("wtf1");
-	size_t len = strlen(s);
-	printf("wtf2");
-
-	for (size_t i = 0; i < len; i++) {
-		if (!isprint(s[i])) {
-			return false;
-		}
-	}
-
-	return true;
-}
 
 void string_printer(int ofd, char* s) {
-	// this line might explode
 	char x;
-
 	int i;
 	for (i = 0; i < 25; i++) {
 		if (!address_valid(s+i, &x)) {
@@ -103,19 +86,18 @@ void string_printer(int ofd, char* s) {
 
 // ebp: base pointer of function fn_info
 void print_function_signature(int ofd, void* ebp, const functsym_t* fn_info) {
+	int i, j;
 	dprintf(ofd, "Function %s(", fn_info->name);
 
-	int argument_count = 0;
-	for (int i = 0; i < ARGS_MAX_NUM && strlen(fn_info->args[i].name) > 0; i++) {
+	for (i = 0; i < ARGS_MAX_NUM && strlen(fn_info->args[i].name) > 0; i++) {
 		// if not first argument, print a comma
-		if (argument_count > 0) {
+		if (i > 0) {
 			dprintf(ofd, ", ");
 		}
 
 		const argsym_t* arg = &(fn_info->args[i]);
 		void* arg_ptr = ebp + arg->offset;
 
-		argument_count++;
 		switch (arg->type)
 		{
 		case TYPE_CHAR:
@@ -142,15 +124,22 @@ void print_function_signature(int ofd, void* ebp, const functsym_t* fn_info) {
 			break;
 		case TYPE_STRING_ARRAY:
 			dprintf(ofd, "char **%s={", arg->name);
-			// TODO: check valid
-			for (int i=0; i < 3; i++) {
-				if (i > 0) {
+			for (j=0; j < 3; j++) {
+				char* string = (*((char ***)arg_ptr))[j];
+				if (string == NULL) {
+					break;
+				} 
+				if (j > 0) {
 					dprintf(ofd, ", ");
 				}
-				string_printer(ofd, (*((char ***)arg_ptr))[i]);
+				string_printer(ofd, string);
 			}
 
-			dprintf(ofd, ", ...}");
+			if (j == 3 && (*((char ***)arg_ptr))[3] != NULL) {
+				dprintf(ofd, ", ...}");
+			} else {
+				dprintf(ofd, "}");
+			}
 			break;
 		case TYPE_VOIDSTAR:
 			// TODO:
@@ -163,33 +152,60 @@ void print_function_signature(int ofd, void* ebp, const functsym_t* fn_info) {
 		}
 	}
 
-	if (argument_count == 0) {
+	if (i == 0) {
 		dprintf(ofd, "void), in\n");
 	} else {
 		dprintf(ofd, "), in\n");
 	}
 }
 
+void cleanup(sigset_t* old_set, struct sigaction* act) {
+	sigprocmask(SIG_SETMASK, old_set, NULL);
+	sigaction(SIGSEGV, act, NULL);
+}
+
 void traceback(int ofd)
 {
+	sigset_t segv_only;
+	sigset_t old_set;
+	sigemptyset(&segv_only);
+	sigaddset(&segv_only, SIGSEGV);
+	sigprocmask(SIG_UNBLOCK, &segv_only, &old_set);
+
 	// Set up SIGSEGV handler
 	struct sigaction act;
+	struct sigaction old_act;
 	act.sa_sigaction = &sigsegv_handler;
 	act.sa_flags = SA_SIGINFO;
 
-	sigaction(SIGSEGV, &act, NULL);
+	sigaction(SIGSEGV, &act, &old_act);
 
 	void* ebp = get_ebp();
 	void* next_ebp = NULL;
+	char tmp;
 
 	while (true) {
-		void *traceback_addr = get_function_addr_from_ebp(ebp, &next_ebp);
-		const functsym_t *fn_info = find_function_at_address(traceback_addr);
-		if (strcmp(fn_info->name, "__libc_start_main") == 0) {
+		if (!address_valid(ebp, &tmp)) {
+			dprintf(ofd, "FATAL: Invalid frame base pointer\n");
+			break;
 			return;
 		}
-		print_function_signature(ofd, next_ebp, fn_info);
+		void *traceback_addr = get_function_addr_from_ebp(ebp, &next_ebp);
+		const functsym_t *fn_info = find_function_at_address(traceback_addr);
+		if (fn_info == NULL)
+		{
+			dprintf(ofd, "Function %p(...), in\n", traceback_addr);
+		}
+		else if (strcmp(fn_info->name, "__libc_start_main") == 0)
+		{
+			break;
+		}
+		else
+		{
+			print_function_signature(ofd, next_ebp, fn_info);
+		}
 		ebp = next_ebp;
 	}
+	cleanup(&old_set, &old_act);
 }
 
